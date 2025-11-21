@@ -3,6 +3,7 @@ Anthropic client for Claude models (direct API, not via Bedrock).
 """
 import json
 import logging
+import time
 from typing import Optional, Dict, Any
 from tenacity import (
     retry,
@@ -22,6 +23,7 @@ except ImportError:
 from fincli.clients.base_llm_client import BaseLLMClient
 from fincli.config import get_settings
 from fincli.utils.logger import get_logger
+from fincli.observability.llm_tracker import get_metrics_tracker
 
 logger = get_logger(__name__)
 std_logger = logging.getLogger(__name__)
@@ -96,16 +98,18 @@ class AnthropicClient(BaseLLMClient):
         prompt: str,
         system_prompt: Optional[str] = None,
         max_tokens: Optional[int] = None,
-        temperature: Optional[float] = None
+        temperature: Optional[float] = None,
+        use_case: str = "default"
     ) -> str:
         """
-        Call Anthropic API with retry logic.
+        Call Anthropic API with retry logic and metrics tracking.
 
         Args:
             prompt: User prompt
             system_prompt: Optional system instructions
             max_tokens: Maximum tokens to generate
             temperature: Sampling temperature
+            use_case: Use case for metrics tracking
 
         Returns:
             Generated text response
@@ -129,33 +133,60 @@ class AnthropicClient(BaseLLMClient):
         if system_prompt:
             kwargs["system"] = system_prompt
 
+        # Track metrics
+        metrics_tracker = get_metrics_tracker()
+        start_time = time.time()
+        success = False
+        error_message = None
+        input_tokens = 0
+        output_tokens = 0
+
         try:
             response = self.client.messages.create(**kwargs)
 
             generated_text = response.content[0].text
+            input_tokens = response.usage.input_tokens
+            output_tokens = response.usage.output_tokens
+            success = True
 
             logger.info(
                 "anthropic_api_call_success",
                 model=self.model_name,
-                input_tokens=response.usage.input_tokens,
-                output_tokens=response.usage.output_tokens
+                input_tokens=input_tokens,
+                output_tokens=output_tokens
             )
 
             return generated_text
 
         except APIError as e:
-            logger.error("anthropic_api_error", error=str(e))
-            raise AnthropicClientError(f"Anthropic API error: {str(e)}")
+            error_message = str(e)
+            logger.error("anthropic_api_error", error=error_message)
+            raise AnthropicClientError(f"Anthropic API error: {error_message}")
         except Exception as e:
-            logger.error("anthropic_unexpected_error", error=str(e))
-            raise AnthropicClientError(f"Unexpected Anthropic error: {str(e)}")
+            error_message = str(e)
+            logger.error("anthropic_unexpected_error", error=error_message)
+            raise AnthropicClientError(f"Unexpected Anthropic error: {error_message}")
+        finally:
+            # Track metrics regardless of success/failure
+            latency_ms = (time.time() - start_time) * 1000
+            metrics_tracker.track_call(
+                provider="anthropic",
+                model=self.model_name,
+                use_case=use_case,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                latency_ms=latency_ms,
+                success=success,
+                error_message=error_message
+            )
 
     def generate_text(
         self,
         prompt: str,
         system_prompt: Optional[str] = None,
         max_tokens: Optional[int] = None,
-        temperature: Optional[float] = None
+        temperature: Optional[float] = None,
+        use_case: str = "default"
     ) -> str:
         """
         Generate text using Anthropic Claude model.
@@ -165,6 +196,7 @@ class AnthropicClient(BaseLLMClient):
             system_prompt: Optional system instructions
             max_tokens: Maximum tokens in response
             temperature: Sampling temperature (0.0 to 1.0)
+            use_case: Use case for metrics tracking
 
         Returns:
             Generated text response
@@ -177,7 +209,8 @@ class AnthropicClient(BaseLLMClient):
                 prompt=prompt,
                 system_prompt=system_prompt,
                 max_tokens=max_tokens,
-                temperature=temperature
+                temperature=temperature,
+                use_case=use_case
             )
         except Exception as e:
             logger.error("anthropic_text_generation_failed", error=str(e))
@@ -187,7 +220,8 @@ class AnthropicClient(BaseLLMClient):
         self,
         prompt: str,
         system_prompt: Optional[str] = None,
-        max_tokens: Optional[int] = None
+        max_tokens: Optional[int] = None,
+        use_case: str = "extraction"
     ) -> Dict[str, Any]:
         """
         Generate and parse JSON response from Anthropic.
@@ -196,6 +230,7 @@ class AnthropicClient(BaseLLMClient):
             prompt: User prompt with data to extract
             system_prompt: Optional system instructions for extraction
             max_tokens: Maximum tokens in response
+            use_case: Use case for metrics tracking
 
         Returns:
             Parsed JSON object
@@ -209,7 +244,8 @@ class AnthropicClient(BaseLLMClient):
                 prompt=prompt,
                 system_prompt=system_prompt,
                 max_tokens=max_tokens,
-                temperature=0.0
+                temperature=0.0,
+                use_case=use_case
             )
 
             # Clean the response - remove markdown code blocks if present

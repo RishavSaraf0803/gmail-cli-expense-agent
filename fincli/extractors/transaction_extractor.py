@@ -8,6 +8,8 @@ from dateutil import parser as date_parser
 from fincli.clients.base_llm_client import BaseLLMClient
 from fincli.clients.llm_factory import get_llm_client, LLMClientError
 from fincli.clients.gmail_client import EmailMessage
+from fincli.prompts.prompt_manager import get_prompt_manager
+from fincli.cache.llm_cache import LLMCache
 from fincli.utils.logger import get_logger
 from fincli.config import get_settings
 
@@ -77,8 +79,9 @@ class ExtractedTransaction:
 
 
 class TransactionExtractor:
-    """Extracts transaction data from email messages using LLM."""
+    """Extracts transaction data from email messages using LLM with versioned prompts."""
 
+    # Deprecated: Use prompt files instead
     EXTRACTION_SYSTEM_PROMPT = """You are an expert financial transaction extractor.
 From the provided email content, extract the following transaction details:
 
@@ -96,7 +99,10 @@ Do not include any explanations, markdown formatting, or additional text. Only r
     def __init__(
         self,
         llm_client: Optional[BaseLLMClient] = None,
-        use_router: bool = False
+        use_router: bool = False,
+        prompt_version: Optional[str] = None,
+        use_prompts: bool = True,
+        enable_cache: Optional[bool] = None
     ):
         """
         Initialize transaction extractor.
@@ -104,25 +110,68 @@ Do not include any explanations, markdown formatting, or additional text. Only r
         Args:
             llm_client: Optional LLM client. If not provided, will use factory or router.
             use_router: If True, use LLM router for use-case based selection (default: False).
+            prompt_version: Specific prompt version to use (e.g., 'v1', 'v2'). None = latest.
+            use_prompts: If True, use PromptManager. If False, use hardcoded prompt (legacy).
+            enable_cache: Enable response caching. None = use config setting.
 
         Note:
             When use_router=True, extraction will use the provider configured for
             the EXTRACTION use case (e.g., Claude for best accuracy).
         """
+        # Determine cache setting
+        self.enable_cache = enable_cache if enable_cache is not None else settings.cache_enabled
+
         if llm_client:
             self.llm_client = llm_client
             self.use_router = False
-            logger.info("transaction_extractor_initialized", mode="custom_client")
+            logger.info("transaction_extractor_initialized", mode="custom_client", cache=self.enable_cache)
         elif use_router:
             from fincli.clients.llm_router import get_llm_router
             self.router = get_llm_router()
             self.llm_client = None  # Will use router instead
             self.use_router = True
-            logger.info("transaction_extractor_initialized", mode="router")
+            logger.info("transaction_extractor_initialized", mode="router", cache=self.enable_cache)
         else:
             self.llm_client = get_llm_client()
             self.use_router = False
-            logger.info("transaction_extractor_initialized", mode="factory")
+            logger.info("transaction_extractor_initialized", mode="factory", cache=self.enable_cache)
+
+        # Wrap client with cache if enabled
+        if self.enable_cache and self.llm_client and not self.use_router:
+            self.llm_client = LLMCache(
+                llm_client=self.llm_client,
+                enable_cache=True,
+                ttl_seconds=settings.cache_ttl_seconds,
+                max_entries=settings.cache_max_entries
+            )
+            logger.info("cache_wrapper_enabled")
+
+        # Load prompt template
+        self.use_prompts = use_prompts
+        self.prompt_version = prompt_version
+        if use_prompts:
+            try:
+                self.prompt_manager = get_prompt_manager()
+                self.prompt_template = self.prompt_manager.load_prompt(
+                    category='extraction',
+                    name='transaction',
+                    version=prompt_version
+                )
+                logger.info(
+                    "prompt_loaded",
+                    version=self.prompt_template.version,
+                    use_prompts=True
+                )
+            except Exception as e:
+                logger.warning(
+                    "prompt_load_failed_using_fallback",
+                    error=str(e)
+                )
+                self.use_prompts = False
+                self.prompt_template = None
+        else:
+            self.prompt_template = None
+            logger.info("using_legacy_hardcoded_prompt")
 
     def _parse_date(self, date_str: str) -> datetime:
         """
@@ -227,28 +276,43 @@ Do not include any explanations, markdown formatting, or additional text. Only r
         logger.info(
             "extracting_transaction_from_email",
             email_id=email.message_id,
-            subject=email.subject
+            subject=email.subject,
+            using_prompts=self.use_prompts,
+            prompt_version=self.prompt_template.version if self.prompt_template else "legacy"
         )
 
         try:
-            # Build prompt
-            prompt = email.get_context_text()
+            # Build prompt using template or raw email content
+            email_content = email.get_context_text()
+
+            if self.use_prompts and self.prompt_template:
+                # Use versioned prompt template
+                user_prompt = self.prompt_template.render_user_prompt(
+                    email_content=email_content
+                )
+                system_prompt = self.prompt_template.system_prompt
+                max_tokens = self.prompt_template.get_parameter('max_tokens', 500)
+            else:
+                # Fallback to legacy hardcoded prompt
+                user_prompt = email_content
+                system_prompt = self.EXTRACTION_SYSTEM_PROMPT
+                max_tokens = 500
 
             # Call LLM to extract
             try:
                 if self.use_router:
                     from fincli.clients.llm_router import LLMUseCase
                     raw_data = self.router.extract_json(
-                        prompt=prompt,
+                        prompt=user_prompt,
                         use_case=LLMUseCase.EXTRACTION,
-                        system_prompt=self.EXTRACTION_SYSTEM_PROMPT,
-                        max_tokens=500
+                        system_prompt=system_prompt,
+                        max_tokens=max_tokens
                     )
                 else:
                     raw_data = self.llm_client.extract_json(
-                        prompt=prompt,
-                        system_prompt=self.EXTRACTION_SYSTEM_PROMPT,
-                        max_tokens=500
+                        prompt=user_prompt,
+                        system_prompt=system_prompt,
+                        max_tokens=max_tokens
                     )
             except LLMClientError as e:
                 logger.error(

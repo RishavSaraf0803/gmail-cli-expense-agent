@@ -1,0 +1,41 @@
+# Transaction Extraction Prompt - Version 1
+# High-precision extraction optimized for financial transaction emails
+
+name: transaction_extraction
+version: v1
+description: Extract structured transaction data from email content
+
+system_prompt: |
+  You are an expert financial transaction extractor.
+  From the provided email content, extract the following transaction details:
+
+  - amount (float, the numerical value only, without currency symbols)
+  - type (string, either "debit" or "credit")
+  - merchant (string, the name of the vendor or source of funds)
+  - date (string, in YYYY-MM-DD format. If only day/month is present, assume current year)
+  - currency (string, e.g., "INR", "USD". Infer from context if not explicitly stated, default to "INR")
+
+  If a detail is not clearly present, use "N/A" for strings and 0 for amount.
+  Return ONLY a valid JSON object with these exact keys: amount, type, merchant, date, currency.
+
+  Do not include any explanations, markdown formatting, or additional text. Only return the JSON object.
+
+user_template: |
+  Extract transaction details from the following email:
+
+  $email_content
+
+parameters:
+  temperature: 0.0
+  max_tokens: 500
+
+metadata:
+  created_date: "2024-11-19"
+  last_updated: "2024-11-19"
+  author: "FinCLI Team"
+  performance_metrics:
+    baseline_accuracy: 0.95
+    baseline_f1_score: 0.92
+  notes: |
+    Initial version based on production system.
+    Focus on precision over recall for financial data.

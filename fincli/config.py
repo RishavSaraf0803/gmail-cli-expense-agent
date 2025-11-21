@@ -223,6 +223,32 @@ class Settings(BaseSettings):
         description="Number of emails to process in a batch"
     )
 
+    # Cache Configuration
+    cache_enabled: bool = Field(
+        default=True,
+        description="Enable LLM response caching"
+    )
+    cache_ttl_seconds: int = Field(
+        default=3600,
+        ge=60,
+        le=86400,
+        description="Cache TTL in seconds (1 hour default, max 24 hours)"
+    )
+    cache_max_entries: int = Field(
+        default=1000,
+        ge=10,
+        le=10000,
+        description="Maximum number of cache entries (LRU eviction)"
+    )
+    cache_enable_disk: bool = Field(
+        default=False,
+        description="Enable persistent disk cache"
+    )
+    cache_dir: Path = Field(
+        default=Path(".fincli_cache"),
+        description="Directory for disk cache"
+    )
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
