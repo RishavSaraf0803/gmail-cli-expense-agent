@@ -104,7 +104,14 @@ class Transaction(Base):
         String(100),
         nullable=True,
         index=True,
-        comment="Transaction category (for future use)"
+        comment="Transaction category (e.g., Food & Dining, Shopping)"
+    )
+
+    payment_method: Mapped[Optional[str]] = mapped_column(
+        String(50),
+        nullable=True,
+        index=True,
+        comment="Payment method (e.g., Credit Card, UPI, Cash)"
     )
 
     notes: Mapped[Optional[str]] = mapped_column(
@@ -144,6 +151,7 @@ class Transaction(Base):
             "email_snippet": self.email_snippet,
             "email_date": self.email_date.isoformat() if self.email_date else None,
             "category": self.category,
+            "payment_method": self.payment_method,
             "notes": self.notes,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),

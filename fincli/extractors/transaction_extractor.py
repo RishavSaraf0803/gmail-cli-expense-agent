@@ -32,6 +32,8 @@ class ExtractedTransaction:
         merchant: str,
         transaction_date: datetime,
         currency: str = "INR",
+        category: Optional[str] = None,
+        payment_method: Optional[str] = None,
         raw_data: Optional[Dict[str, Any]] = None
     ):
         """
@@ -43,6 +45,8 @@ class ExtractedTransaction:
             merchant: Merchant name
             transaction_date: Transaction date
             currency: Currency code
+            category: Transaction category (optional)
+            payment_method: Payment method used (optional)
             raw_data: Raw extraction data
         """
         self.amount = amount
@@ -50,17 +54,25 @@ class ExtractedTransaction:
         self.merchant = merchant
         self.transaction_date = transaction_date
         self.currency = currency
+        self.category = category
+        self.payment_method = payment_method
         self.raw_data = raw_data or {}
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
-        return {
+        result = {
             "amount": self.amount,
             "transaction_type": self.transaction_type,
             "merchant": self.merchant,
             "transaction_date": self.transaction_date.isoformat(),
             "currency": self.currency,
         }
+        # Include optional fields if present
+        if self.category:
+            result["category"] = self.category
+        if self.payment_method:
+            result["payment_method"] = self.payment_method
+        return result
 
     def is_valid(self) -> bool:
         """
@@ -246,13 +258,35 @@ Do not include any explanations, markdown formatting, or additional text. Only r
             if currency == 'N/A':
                 currency = 'INR'
 
-            return {
+            # Optional: Category
+            category = None
+            if 'category' in data and data['category']:
+                category = str(data['category']).strip()
+                if category.upper() == 'N/A':
+                    category = None
+
+            # Optional: Payment Method
+            payment_method = None
+            if 'payment_method' in data and data['payment_method']:
+                payment_method = str(data['payment_method']).strip()
+                if payment_method.upper() in ['N/A', 'UNKNOWN']:
+                    payment_method = None
+
+            result = {
                 'amount': amount,
                 'type': transaction_type,
                 'merchant': merchant,
                 'date': transaction_date,
                 'currency': currency
             }
+
+            # Add optional fields if present
+            if category:
+                result['category'] = category
+            if payment_method:
+                result['payment_method'] = payment_method
+
+            return result
 
         except (ValueError, TypeError) as e:
             raise TransactionExtractorError(f"Data validation failed: {e}")
@@ -347,6 +381,8 @@ Do not include any explanations, markdown formatting, or additional text. Only r
                 merchant=cleaned_data['merchant'],
                 transaction_date=cleaned_data['date'],
                 currency=cleaned_data['currency'],
+                category=cleaned_data.get('category'),
+                payment_method=cleaned_data.get('payment_method'),
                 raw_data=raw_data
             )
 

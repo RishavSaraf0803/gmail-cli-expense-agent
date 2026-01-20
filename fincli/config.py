@@ -15,6 +15,28 @@ class Settings(BaseSettings):
     app_name: str = "FinCLI"
     debug: bool = Field(default=False, description="Enable debug mode")
 
+    # API Authentication
+    api_key: Optional[str] = Field(
+        default=None,
+        description="API key for authentication (required in production)"
+    )
+    api_auth_enabled: bool = Field(
+        default=True,
+        description="Enable API key authentication"
+    )
+
+    # Rate Limiting
+    rate_limit_per_minute: int = Field(
+        default=100,
+        ge=1,
+        description="Max requests per minute per API key"
+    )
+    rate_limit_per_hour: int = Field(
+        default=1000,
+        ge=1,
+        description="Max requests per hour per API key"
+    )
+
     # Gmail API
     gmail_scopes: list[str] = Field(
         default=["https://www.googleapis.com/auth/gmail.readonly"],

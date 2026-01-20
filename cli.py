@@ -169,7 +169,9 @@ def fetch(
                         currency=transaction.currency,
                         email_subject=email.subject,
                         email_snippet=email.snippet,
-                        email_date=parse_email_date(email.date)
+                        email_date=parse_email_date(email.date),
+                        category=transaction.category,
+                        payment_method=transaction.payment_method
                     )
 
                     if result:

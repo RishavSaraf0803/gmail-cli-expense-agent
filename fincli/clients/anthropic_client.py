@@ -24,6 +24,7 @@ from fincli.clients.base_llm_client import BaseLLMClient
 from fincli.config import get_settings
 from fincli.utils.logger import get_logger
 from fincli.observability.llm_tracker import get_metrics_tracker
+from fincli.resilience import get_circuit_breaker, CircuitBreakerConfig
 
 logger = get_logger(__name__)
 std_logger = logging.getLogger(__name__)
@@ -31,6 +32,16 @@ settings = get_settings()
 
 # Global singleton instance
 _anthropic_client = None
+
+# Circuit breaker for Anthropic API
+_anthropic_circuit_breaker = get_circuit_breaker(
+    "anthropic",
+    CircuitBreakerConfig(
+        failure_threshold=5,      # Open after 5 failures
+        success_threshold=2,      # Close after 2 successes
+        timeout_seconds=60        # Try again after 60s
+    )
+)
 
 
 class AnthropicClientError(Exception):
@@ -86,13 +97,6 @@ class AnthropicClient(BaseLLMClient):
             logger.error("anthropic_client_initialization_failed", error=str(e))
             raise AnthropicClientError(f"Failed to initialize Anthropic client: {e}")
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(min=1, max=10),
-        retry=retry_if_exception_type((APIError, Exception)),
-        before_sleep=before_sleep_log(std_logger, logging.WARNING),
-        after=after_log(std_logger, logging.DEBUG)
-    )
     def _call_anthropic_api(
         self,
         prompt: str,
@@ -189,7 +193,7 @@ class AnthropicClient(BaseLLMClient):
         use_case: str = "default"
     ) -> str:
         """
-        Generate text using Anthropic Claude model.
+        Generate text using Anthropic Claude model with circuit breaker protection.
 
         Args:
             prompt: User prompt/question
@@ -203,9 +207,12 @@ class AnthropicClient(BaseLLMClient):
 
         Raises:
             AnthropicClientError: If generation fails
+            CircuitBreakerError: If circuit breaker is open
         """
         try:
-            return self._call_anthropic_api(
+            # Wrap API call with circuit breaker
+            return _anthropic_circuit_breaker.call(
+                self._call_anthropic_api,
                 prompt=prompt,
                 system_prompt=system_prompt,
                 max_tokens=max_tokens,
@@ -214,7 +221,7 @@ class AnthropicClient(BaseLLMClient):
             )
         except Exception as e:
             logger.error("anthropic_text_generation_failed", error=str(e))
-            raise AnthropicClientError(f"Text generation failed: {str(e)}")
+            raise
 
     def extract_json(
         self,
@@ -239,8 +246,9 @@ class AnthropicClient(BaseLLMClient):
             AnthropicClientError: If JSON extraction or parsing fails
         """
         try:
-            # Use temperature 0 for deterministic JSON output
-            text = self._call_anthropic_api(
+            # Wrap API call with circuit breaker - use temperature 0 for deterministic JSON output
+            text = _anthropic_circuit_breaker.call(
+                self._call_anthropic_api,
                 prompt=prompt,
                 system_prompt=system_prompt,
                 max_tokens=max_tokens,

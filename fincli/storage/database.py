@@ -99,6 +99,7 @@ class DatabaseManager:
         email_snippet: Optional[str] = None,
         email_date: Optional[datetime] = None,
         category: Optional[str] = None,
+        payment_method: Optional[str] = None,
         notes: Optional[str] = None,
     ) -> Optional[Transaction]:
         """
@@ -115,6 +116,7 @@ class DatabaseManager:
             email_snippet: Email snippet
             email_date: Email date
             category: Transaction category
+            payment_method: Payment method used
             notes: Additional notes
 
         Returns:
@@ -133,6 +135,7 @@ class DatabaseManager:
                     email_snippet=email_snippet,
                     email_date=email_date,
                     category=category,
+                    payment_method=payment_method,
                     notes=notes,
                 )
                 session.add(transaction)
