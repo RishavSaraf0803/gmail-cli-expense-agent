@@ -6,6 +6,7 @@ Fails fast if critical requirements are not met.
 """
 from typing import List, Tuple
 import sys
+from sqlalchemy import text
 
 from fincli.config import get_settings
 from fincli.storage.database import DatabaseManager
@@ -88,7 +89,7 @@ def validate_database() -> None:
 
         # Test connection
         with db.get_session() as session:
-            session.execute("SELECT 1")
+            session.execute(text("SELECT 1"))
 
         logger.info("database_validated", url=db.database_url)
 

@@ -5,6 +5,7 @@ from fastapi import APIRouter, status
 from fastapi.responses import JSONResponse
 from typing import Dict, Any
 import time
+from sqlalchemy import text
 
 from fincli.api.dependencies import get_db_manager
 from fincli.clients.llm_factory import get_llm_client, LLMClientError
@@ -73,7 +74,7 @@ async def readiness_check() -> JSONResponse:
 
         # Try a simple query
         with db.get_session() as session:
-            session.execute("SELECT 1")
+            session.execute(text("SELECT 1"))
 
         latency_ms = int((time.time() - start) * 1000)
         checks["database"] = {
@@ -177,7 +178,7 @@ async def startup_check() -> JSONResponse:
     try:
         db = get_db_manager()
         with db.get_session() as session:
-            session.execute("SELECT 1")
+            session.execute(text("SELECT 1"))
         checks["database_initialized"] = True
     except Exception as e:
         logger.error("startup_check_database_failed", error=str(e))

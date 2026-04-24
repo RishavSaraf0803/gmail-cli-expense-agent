@@ -42,6 +42,7 @@ class OpenAIClient(BaseLLMClient):
     def __init__(
         self,
         api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
         model_name: Optional[str] = None,
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
@@ -51,7 +52,8 @@ class OpenAIClient(BaseLLMClient):
         Initialize OpenAI client.
 
         Args:
-            api_key: OpenAI API key
+            api_key: OpenAI API key (or OpenRouter API key)
+            base_url: Custom base URL (e.g., https://openrouter.ai/api/v1)
             model_name: Model name (e.g., 'gpt-4', 'gpt-3.5-turbo')
             max_tokens: Maximum tokens to generate
             temperature: Sampling temperature
@@ -66,16 +68,21 @@ class OpenAIClient(BaseLLMClient):
             )
 
         self.api_key = api_key or settings.openai_api_key
+        self.base_url = base_url or settings.openai_base_url
         self.model_name = model_name or settings.openai_model_name
         self.max_tokens = max_tokens or settings.openai_max_tokens
         self.temperature = temperature or settings.openai_temperature
         self.timeout = timeout or settings.openai_timeout
 
         try:
-            self.client = OpenAI(
-                api_key=self.api_key,
-                timeout=self.timeout
-            )
+            client_kwargs = {
+                "api_key": self.api_key,
+                "timeout": self.timeout
+            }
+            if self.base_url:
+                client_kwargs["base_url"] = self.base_url
+
+            self.client = OpenAI(**client_kwargs)
             logger.info(
                 "openai_client_initialized",
                 model=self.model_name
