@@ -116,11 +116,19 @@ class Settings(BaseSettings):
         ge=1,
         description="Timeout for Ollama API calls in seconds"
     )
+    ollama_embed_model: str = Field(
+        default="nomic-embed-text",
+        description="Ollama model for generating embeddings (RAG)"
+    )
 
     # OpenAI Configuration
     openai_api_key: Optional[str] = Field(
         default=None,
         description="OpenAI API key"
+    )
+    openai_base_url: Optional[str] = Field(
+        default=None,
+        description="Custom base URL for OpenAI API (e.g., for OpenRouter: https://openrouter.ai/api/v1)"
     )
     openai_model_name: str = Field(
         default="gpt-4",

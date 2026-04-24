@@ -3,7 +3,7 @@ SQLAlchemy database models for FinCLI.
 """
 from datetime import datetime
 from typing import Optional
-from sqlalchemy import String, Float, DateTime, Index
+from sqlalchemy import String, Float, DateTime, Index, LargeBinary, ForeignKey
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -128,7 +128,6 @@ class Transaction(Base):
     )
 
     def __repr__(self) -> str:
-        """String representation of Transaction."""
         return (
             f"<Transaction(id={self.id}, "
             f"type={self.transaction_type}, "
@@ -136,6 +135,21 @@ class Transaction(Base):
             f"merchant='{self.merchant}', "
             f"date={self.transaction_date.strftime('%Y-%m-%d')})>"
         )
+
+    def to_embedding_text(self) -> str:
+        """Canonical text representation used for embedding — keep stable across re-indexes."""
+        date_str = self.transaction_date.strftime('%Y-%m-%d')
+        parts = [
+            self.transaction_type,
+            f"{self.currency} {self.amount}",
+            f"at {self.merchant}",
+            f"on {date_str}",
+        ]
+        if self.category:
+            parts.append(f"category: {self.category}")
+        if self.payment_method:
+            parts.append(f"via {self.payment_method}")
+        return " ".join(parts)
 
     def to_dict(self) -> dict:
         """Convert transaction to dictionary."""
@@ -156,3 +170,38 @@ class Transaction(Base):
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
         }
+
+
+class TransactionEmbedding(Base):
+    """
+    RAG CONCEPT — Embeddings table:
+    Each transaction gets a vector (list of floats) that encodes its semantic meaning.
+    Stored as raw bytes (BLOB) and deserialized back to numpy arrays at query time.
+    1:1 with Transaction — one embedding per transaction.
+    """
+    __tablename__ = "transaction_embeddings"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+
+    transaction_id: Mapped[int] = mapped_column(
+        ForeignKey("transactions.id", ondelete="CASCADE"),
+        unique=True,
+        nullable=False,
+        index=True,
+    )
+
+    # The actual vector — serialized float32 numpy array
+    embedding: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+
+    # What text was embedded — critical for debugging and re-indexing
+    embedding_text: Mapped[str] = mapped_column(String(2000), nullable=False)
+
+    # Track which model produced this embedding (vectors from different models are incompatible)
+    model: Mapped[str] = mapped_column(String(100), nullable=False, default="nomic-embed-text")
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return f"<TransactionEmbedding(transaction_id={self.transaction_id}, model={self.model})>"

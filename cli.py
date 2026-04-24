@@ -23,6 +23,9 @@ from fincli.extractors.transaction_extractor import (
     TransactionExtractorError
 )
 from fincli.auth.gmail_auth import test_gmail_connection
+from fincli.rag.embedder import OllamaEmbedder, EmbedderError
+from fincli.rag.indexer import TransactionIndexer
+from fincli.rag.retriever import HybridRetriever
 
 # Initialize
 app = typer.Typer(
@@ -265,9 +268,60 @@ def summarize():
 
 
 @app.command()
+def index(
+    reindex: bool = typer.Option(False, "--reindex", "-r", help="Force re-embed all transactions"),
+):
+    """
+    Build the RAG search index from your transactions.
+
+    Run this after 'fetch' to make new transactions searchable in chat.
+    Uses Ollama nomic-embed-text to generate embeddings locally (free).
+    """
+    init_app()
+    logger.info("index_command_started", reindex=reindex)
+
+    try:
+        db = get_db_manager()
+        embedder = OllamaEmbedder()
+
+        if not embedder.health_check():
+            console.print(
+                "[red]Ollama embedding model not available.[/red]\n"
+                f"[yellow]Run: ollama pull {embedder.model}[/yellow]"
+            )
+            raise typer.Exit(code=1)
+
+        with db.get_session() as session:
+            indexer = TransactionIndexer(session, embedder)
+
+            if reindex:
+                console.print("[yellow]Re-indexing all transactions...[/yellow]")
+                count = indexer.reindex_all()
+            else:
+                count = indexer.index_new()
+
+        if count == 0:
+            console.print("[green]Index is up to date — nothing new to index.[/green]")
+        else:
+            console.print(f"[green]Indexed {count} transaction(s).[/green]")
+
+        logger.info("index_command_completed", indexed=count)
+
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        logger.error("index_command_failed", error=str(e))
+        raise typer.Exit(code=1)
+
+
+@app.command()
 def chat():
     """
-    Start an interactive Q&A session about your expenses.
+    Start an interactive Q&A session about your expenses (RAG-powered).
+
+    Each question retrieves the most relevant transactions via semantic search,
+    then passes only those as context to the LLM — more accurate, less token waste.
+
+    Run 'index' first to build the search index.
     """
     init_app()
 
@@ -279,62 +333,75 @@ def chat():
         db = get_db_manager()
         llm_client = get_llm_client()
 
-        # Check if there are transactions
         if db.count_transactions() == 0:
             console.print("[yellow]No transactions found. Run 'fetch' first.[/yellow]")
             return
 
-        # Get recent transactions for context
-        recent_transactions = db.get_all_transactions(limit=50)
+        embedder = OllamaEmbedder()
+        rag_available = embedder.health_check()
 
-        # Build context string
-        context_lines = []
-        for txn in recent_transactions:
-            date_str = txn.transaction_date.strftime('%Y-%m-%d')
-            context_lines.append(
-                f"- {txn.transaction_type} of {txn.currency} {txn.amount} "
-                f"for {txn.merchant} on {date_str}."
+        if not rag_available:
+            console.print(
+                f"[yellow]RAG index unavailable (run: ollama pull {embedder.model}). "
+                "Falling back to last-50 context.[/yellow]\n"
             )
-        context_str = "\n".join(context_lines)
 
-        # Chat loop
-        while True:
-            question = console.input("[bold green]You >[/bold green] ")
+        with db.get_session() as session:
+            retriever = HybridRetriever(session, embedder) if rag_available else None
 
-            if question.lower().strip() in ["exit", "quit", "q"]:
-                console.print("[bold cyan]FinCLI >[/bold cyan] Goodbye!")
-                break
+            # Build fallback context once (used only when RAG is unavailable)
+            fallback_context = None
+            if not rag_available:
+                recent = db.get_all_transactions(limit=50)
+                fallback_lines = []
+                for txn in recent:
+                    date_str = txn.transaction_date.strftime("%Y-%m-%d")
+                    fallback_lines.append(
+                        f"- {txn.transaction_type} of {txn.currency} {txn.amount} "
+                        f"for {txn.merchant} on {date_str}."
+                    )
+                fallback_context = "\n".join(fallback_lines)
 
-            if not question.strip():
-                continue
+            while True:
+                question = console.input("[bold green]You >[/bold green] ")
 
-            # Build prompt
-            prompt = f"""You are FinCLI, a helpful personal finance assistant.
-Based ONLY on the following transaction data, answer the user's question.
-If the data doesn't contain the answer, say "I don't have that information in the current transaction data."
-Do not make up information. Be concise and helpful.
+                if question.lower().strip() in ["exit", "quit", "q"]:
+                    console.print("[bold cyan]FinCLI >[/bold cyan] Goodbye!")
+                    break
 
-Transaction Data:
+                if not question.strip():
+                    continue
+
+                try:
+                    with console.status("[bold yellow]Thinking...", spinner="dots"):
+                        # RAG path: retrieve only relevant transactions
+                        if retriever:
+                            context_str = retriever.retrieve_as_context(question, top_k=8)
+                        else:
+                            context_str = fallback_context
+
+                        prompt = f"""You are FinCLI, a helpful personal finance assistant.
+Answer the user's question using ONLY the transaction data below.
+If the data doesn't contain enough information, say so honestly.
+Be concise. When citing amounts, include the currency and date.
+
+Relevant Transactions:
 {context_str}
 
-User Question: {question}
-
+User: {question}
 Answer:"""
 
-            try:
-                # Get answer from LLM
-                with console.status("[bold yellow]Thinking...", spinner="dots"):
-                    answer = llm_client.generate_text(
-                        prompt=prompt,
-                        max_tokens=1024,
-                        temperature=0.3
-                    )
+                        answer = llm_client.generate_text(
+                            prompt=prompt,
+                            max_tokens=1024,
+                            temperature=0.3,
+                        )
 
-                console.print(f"[bold cyan]FinCLI >[/bold cyan] {answer}\n")
+                    console.print(f"[bold cyan]FinCLI >[/bold cyan] {answer}\n")
 
-            except LLMClientError as e:
-                console.print(f"[red]Error getting response: {e}[/red]\n")
-                logger.error("chat_response_failed", error=str(e))
+                except (LLMClientError, EmbedderError) as e:
+                    console.print(f"[red]Error: {e}[/red]\n")
+                    logger.error("chat_response_failed", error=str(e))
 
         logger.info("chat_command_completed")
 
