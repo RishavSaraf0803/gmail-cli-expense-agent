@@ -137,19 +137,39 @@ class Transaction(Base):
         )
 
     def to_embedding_text(self) -> str:
-        """Canonical text representation used for embedding — keep stable across re-indexes."""
+        """
+        Rich text for embedding — combines all available fields.
+
+        AI ENGINEERING LESSON:
+        Embedding quality is directly proportional to text richness.
+        Short, template-structured strings (all sharing the same format)
+        collapse to similar vectors because structure dominates over meaning.
+        More unique, descriptive text per record = better separation in vector space.
+
+        With real Gmail data, email_snippet contains rich prose:
+          "Your Swiggy order of Butter Chicken Thali has been placed..."
+          "PNR 4521893012 confirmed. Train 12951 Mumbai Rajdhani..."
+        That richness makes RAG work. We include it here so real data benefits
+        automatically while seed data falls back to structured fields.
+        """
         date_str = self.transaction_date.strftime('%Y-%m-%d')
         parts = [
-            self.transaction_type,
+            f"{self.transaction_type} transaction",
             f"{self.currency} {self.amount}",
-            f"at {self.merchant}",
-            f"on {date_str}",
+            f"merchant: {self.merchant}",
+            f"date: {date_str}",
         ]
         if self.category:
             parts.append(f"category: {self.category}")
         if self.payment_method:
-            parts.append(f"via {self.payment_method}")
-        return " ".join(parts)
+            parts.append(f"payment method: {self.payment_method}")
+        # Email subject adds context like "Swiggy Order Confirmation" vs "Railway Ticket Booking"
+        if self.email_subject:
+            parts.append(f"email subject: {self.email_subject}")
+        # Snippet is the richest field — contains actual email prose from Gmail
+        if self.email_snippet:
+            parts.append(f"details: {self.email_snippet}")
+        return " | ".join(parts)
 
     def to_dict(self) -> dict:
         """Convert transaction to dictionary."""
