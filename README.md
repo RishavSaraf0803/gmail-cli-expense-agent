@@ -1,3 +1,4 @@
+
 # FinCLI: AI-Powered Gmail Expense Tracker
 
 **Transform your transaction emails into actionable insights using AI.**
@@ -5,6 +6,8 @@
 A production-ready Python application that connects to Gmail, extracts financial transactions using AI, and provides both a CLI and REST API for expense management and analysis.
 
 [![Tests](https://img.shields.io/badge/tests-73%2F73_passing-success)]() [![Python](https://img.shields.io/badge/python-3.8%2B-blue)]() [![License](https://img.shields.io/badge/license-MIT-green)]() [![Coverage](https://img.shields.io/badge/coverage-38%25-yellow)]()
+
+> **Branch: `feature/rag`** — Adds hybrid RAG (Retrieval-Augmented Generation) for semantic transaction search. See [What's New](#-whats-new-featurerag) below.
 
 ---
 
@@ -28,6 +31,12 @@ python cli.py init
 
 # 5. Start tracking
 python cli.py fetch --max 20
+
+# 6. Build RAG search index (new in this branch)
+ollama pull nomic-embed-text
+python cli.py index
+
+# 7. Chat with semantic search
 python cli.py chat
 ```
 
@@ -41,6 +50,7 @@ python cli.py chat
 - 📧 **Gmail Integration** - Secure OAuth2, read-only access
 - 🤖 **AI Extraction** - Parse transactions from emails automatically
 - 💬 **Natural Language Chat** - Ask questions about your spending
+- 🔍 **Semantic Search (RAG)** - Find transactions by meaning, not just keywords
 - 📊 **Analytics** - Spending summaries, top merchants, trends
 - 🌐 **REST API** - Programmatic access with FastAPI
 - 💾 **Local Storage** - SQLite database, your data stays with you
@@ -69,6 +79,8 @@ Choose the AI provider that fits your needs:
 | **AWS Bedrock** | Low | 10 min | Enterprise deployments |
 
 **Smart Routing:** Use different providers for different tasks (e.g., free Ollama for chat, paid Claude for extraction).
+
+**Embedding Model:** `nomic-embed-text` via Ollama (free, local, 768-dim vectors) for RAG indexing.
 
 ---
 
@@ -137,16 +149,24 @@ python cli.py init
 # Fetch and process emails
 python cli.py fetch --max 50
 
+# Build RAG search index (run after fetch)
+python cli.py index
+
+# Force re-embed all transactions (use after changing embedding model)
+python cli.py index --reindex
+
 # View spending summary
 python cli.py summarize
 
 # List recent transactions
 python cli.py list-transactions --limit 20
 
-# Interactive chat
+# Interactive chat (RAG-powered semantic search)
 python cli.py chat
-> "How much did I spend on food this month?"
-> "What was my biggest expense?"
+> "food delivery transactions"
+> "unusual charges last month"
+> "anything related to my travel"
+> "subscriptions and streaming"
 ```
 
 ### REST API
@@ -231,8 +251,14 @@ echo "FINCLI_ANTHROPIC_API_KEY=sk-ant-..." >> .env
 ├──────────────────────────────────────────┤
 │  Business Logic                          │  Application Layer
 │  ├─ Transaction Extraction               │
-│  ├─ Chat & Analysis                      │
+│  ├─ RAG Chat (Hybrid Retrieval)          │  ← new
 │  └─ Analytics                            │
+├──────────────────────────────────────────┤
+│  RAG Layer                               │  Semantic Search  ← new
+│  ├─ Embedder (nomic-embed-text)          │
+│  ├─ Vector Store (numpy cosine sim)      │
+│  ├─ Hybrid Retriever (SQL + vectors)     │
+│  └─ Indexer (offline embedding pipeline) │
 ├──────────────────────────────────────────┤
 │  Resilience Patterns                     │  Reliability Layer
 │  ├─ Circuit Breaker (LLM)                │
@@ -245,10 +271,32 @@ echo "FINCLI_ANTHROPIC_API_KEY=sk-ant-..." >> .env
 │  └─ LLM Response Cache                   │
 ├──────────────────────────────────────────┤
 │  Data & Integration                      │  Infrastructure Layer
-│  ├─ Database (SQLite)                    │
+│  ├─ Database (SQLite + embeddings table) │  ← updated
 │  ├─ LLM Clients (4 providers)            │
 │  └─ Gmail Client                         │
 └──────────────────────────────────────────┘
+```
+
+### RAG Query Flow
+```
+User question
+      │
+      ▼
+  embed question          ← nomic-embed-text via Ollama
+      │
+      ▼
+  SQL pre-filter          ← extract date/type/amount from query
+  (fast, exact)
+      │
+      ▼
+  cosine similarity       ← rank filtered candidates by semantic similarity
+  on filtered set
+      │
+      ▼
+  top-K transactions      ← passed as context to LLM
+      │
+      ▼
+  LLM answer              ← grounded in relevant transactions only
 ```
 
 **Technology Stack:**
@@ -330,6 +378,48 @@ See **[DEVELOPER_GUIDE.md](docs/guides/DEVELOPER_GUIDE.md#testing)** for testing
 - ❌ High-traffic production (> 100 req/min)
 - ❌ Multi-instance deployments (needs Redis for rate limiter)
 - ❌ Background job processing (needs Celery/Redis)
+
+---
+
+## 🆕 What's New: `feature/rag`
+
+### Hybrid RAG System for Semantic Transaction Search
+
+The `chat` command now uses **Retrieval-Augmented Generation** instead of dumping the last 50 transactions as context. Each question retrieves only the most relevant transactions — faster, more accurate, and cheaper (fewer tokens).
+
+**New command:**
+```bash
+python cli.py index          # embed all transactions (run after fetch)
+python cli.py index --reindex  # force re-embed everything
+```
+
+**How it works:**
+- Transactions are embedded offline using `nomic-embed-text` (free, local via Ollama)
+- Each transaction's email subject + snippet + structured fields are combined into rich text before embedding — real Gmail emails contain prose like *"Your Swiggy order of Butter Chicken has been placed"* which gives the model semantic signal
+- At query time: SQL pre-filters by date/type/amount, then cosine similarity re-ranks the filtered set, top-8 results go to the LLM
+
+**New files:**
+```
+fincli/rag/
+  embedder.py      — text → float32 vector via Ollama
+  vector_store.py  — store/search vectors (numpy cosine similarity on SQLite BLOBs)
+  retriever.py     — hybrid retrieval: SQL pre-filter + vector ranking
+  indexer.py       — offline indexing pipeline (incremental + full reindex)
+```
+
+**New DB table:** `transaction_embeddings` (1:1 with transactions, stores embedding vector + source text + model name)
+
+**New config:**
+```bash
+FINCLI_OLLAMA_EMBED_MODEL=nomic-embed-text  # default
+```
+
+**Key AI engineering concepts demonstrated:**
+- Embeddings and vector similarity (cosine similarity)
+- Offline vs online indexing
+- Hybrid retrieval (SQL metadata filter + semantic ranking)
+- Why RAG works on unstructured text but needs hybrid approach for structured data
+- Top-K context window sizing
 
 ---
 
@@ -446,6 +536,6 @@ Built with:
 
 ---
 
-**Last Updated:** January 2026 | **Version:** 1.0.0
+**Last Updated:** April 2026 | **Version:** 1.1.0-rag
 
 **Ready to start?** Follow the [Quick Start](#-quick-start) guide above!
