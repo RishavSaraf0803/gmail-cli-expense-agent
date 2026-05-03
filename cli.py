@@ -26,6 +26,7 @@ from fincli.auth.gmail_auth import test_gmail_connection
 from fincli.rag.embedder import OllamaEmbedder, EmbedderError
 from fincli.rag.indexer import TransactionIndexer
 from fincli.rag.retriever import HybridRetriever
+from fincli.tools.filter_tool import FilterTool
 
 # Initialize
 app = typer.Typer(
@@ -347,7 +348,8 @@ def chat():
             )
 
         with db.get_session() as session:
-            retriever = HybridRetriever(session, embedder) if rag_available else None
+            filter_tool = FilterTool(llm_client)
+            retriever = HybridRetriever(session, embedder, filter_tool) if rag_available else None
 
             # Build fallback context once (used only when RAG is unavailable)
             fallback_context = None
