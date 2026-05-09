@@ -27,6 +27,7 @@ from fincli.rag.embedder import OllamaEmbedder, EmbedderError
 from fincli.rag.indexer import TransactionIndexer
 from fincli.rag.retriever import HybridRetriever
 from fincli.tools.filter_tool import FilterTool
+from fincli.agents.sql_agent import SQLAgent
 
 # Initialize
 app = typer.Typer(
@@ -410,6 +411,72 @@ Answer:"""
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
         logger.error("chat_command_failed", error=str(e))
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def query(
+    question: str = typer.Argument(..., help="Natural language question about your expenses"),
+):
+    """
+    Ask a precise question about your expenses using AI-generated SQL.
+
+    Unlike 'chat' (which uses semantic search), 'query' writes and runs
+    a real SQL query — perfect for exact totals, counts, and rankings.
+
+    Examples:
+      fincli query "how much did I spend in April?"
+      fincli query "top 5 merchants by total spend"
+      fincli query "total debits grouped by category"
+    """
+    init_app()
+    logger.info("query_command_started", question=question)
+
+    try:
+        db = get_db_manager()
+        llm_client = get_llm_client()
+
+        if db.count_transactions() == 0:
+            console.print("[yellow]No transactions found. Run 'fetch' first.[/yellow]")
+            return
+
+        agent = SQLAgent(llm=llm_client, engine=db.engine)
+
+        with console.status("[bold yellow]Writing query...", spinner="dots"):
+            result = agent.run(question)
+
+        # ── Show generated SQL ─────────────────────────────────────────────────
+        from rich.panel import Panel
+        from rich.syntax import Syntax
+        retry_note = " [yellow](retried)[/yellow]" if result.retried else ""
+        sql_display = Syntax(result.sql, "sql", theme="monokai", word_wrap=True)
+        console.print(Panel(sql_display, title=f"[bold]Generated SQL{retry_note}[/bold]", border_style="dim"))
+
+        # ── Show raw results table ─────────────────────────────────────────────
+        if result.rows:
+            table = Table(title=f"Results ({len(result.rows)} rows)", show_lines=False)
+            for col in result.rows[0].keys():
+                table.add_column(str(col), style="cyan", no_wrap=True)
+            for row in result.rows[:15]:  # cap display at 15 rows
+                table.add_row(*[str(v) if v is not None else "—" for v in row.values()])
+            if len(result.rows) > 15:
+                console.print(f"[dim]  ... and {len(result.rows) - 15} more rows[/dim]")
+            console.print(table)
+        elif not result.error:
+            console.print("[dim]Query returned no rows.[/dim]")
+
+        # ── Show answer ────────────────────────────────────────────────────────
+        console.print(f"\n[bold cyan]FinCLI >[/bold cyan] {result.answer}\n")
+
+        logger.info("query_command_completed", rows=len(result.rows), retried=result.retried)
+
+    except (LLMClientError,) as e:
+        console.print(f"[red]LLM error: {e}[/red]")
+        logger.error("query_command_failed", error=str(e))
+        raise typer.Exit(code=1)
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        logger.error("query_command_failed", error=str(e))
         raise typer.Exit(code=1)
 
 
