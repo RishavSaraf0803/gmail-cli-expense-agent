@@ -28,6 +28,7 @@ from fincli.rag.indexer import TransactionIndexer
 from fincli.rag.retriever import HybridRetriever
 from fincli.tools.filter_tool import FilterTool
 from fincli.agents.sql_agent import SQLAgent
+from fincli.agents.rag_agent import RAGAgent
 
 # Initialize
 app = typer.Typer(
@@ -350,7 +351,12 @@ def chat():
 
         with db.get_session() as session:
             filter_tool = FilterTool(llm_client)
-            retriever = HybridRetriever(session, embedder, filter_tool) if rag_available else None
+
+            if rag_available:
+                retriever = HybridRetriever(session, embedder, filter_tool)
+                rag_agent = RAGAgent(retriever=retriever, llm=llm_client)
+            else:
+                rag_agent = None
 
             # Build fallback context once (used only when RAG is unavailable)
             fallback_context = None
@@ -377,29 +383,35 @@ def chat():
 
                 try:
                     with console.status("[bold yellow]Thinking...", spinner="dots"):
-                        # RAG path: retrieve only relevant transactions
-                        if retriever:
-                            context_str = retriever.retrieve_as_context(question, top_k=8)
+                        if rag_agent:
+                            # RAG agent: self-correcting retrieval + synthesis
+                            result = rag_agent.run(question, top_k=8)
+                            answer = result.answer
+                            rephrased = result.rephrased
+                            rephrased_query = result.final_query
                         else:
-                            context_str = fallback_context
-
-                        prompt = f"""You are FinCLI, a helpful personal finance assistant.
+                            # Fallback: plain LLM with last-50 context
+                            prompt = f"""You are FinCLI, a helpful personal finance assistant.
 Answer the user's question using ONLY the transaction data below.
 If the data doesn't contain enough information, say so honestly.
 Be concise. When citing amounts, include the currency and date.
 
 Relevant Transactions:
-{context_str}
+{fallback_context}
 
 User: {question}
 Answer:"""
+                            answer = llm_client.generate_text(
+                                prompt=prompt,
+                                max_tokens=1024,
+                                temperature=0.3,
+                            )
+                            rephrased = False
 
-                        answer = llm_client.generate_text(
-                            prompt=prompt,
-                            max_tokens=1024,
-                            temperature=0.3,
+                    if rephrased:
+                        console.print(
+                            f"[dim](rephrased: {rephrased_query})[/dim]"
                         )
-
                     console.print(f"[bold cyan]FinCLI >[/bold cyan] {answer}\n")
 
                 except (LLMClientError, EmbedderError) as e:
