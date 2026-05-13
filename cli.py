@@ -30,6 +30,7 @@ from fincli.tools.filter_tool import FilterTool
 from fincli.agents.sql_agent import SQLAgent
 from fincli.agents.rag_agent import RAGAgent
 from fincli.agents.orchestrator import OrchestratorAgent
+from fincli.agents.anomaly_agent import AnomalyAgent
 
 # Initialize
 app = typer.Typer(
@@ -580,6 +581,87 @@ def ask(
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
         logger.error("ask_command_failed", error=str(e))
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def anomalies(
+    months: int = typer.Option(3, "--months", "-m", help="Months of history to scan"),
+):
+    """
+    Scan your recent transactions for statistical anomalies.
+
+    Flags unusually large charges (relative to your own category history),
+    one-off merchants, and globally large transactions. Uses statistical
+    detection in code, then LLM narration for the summary.
+
+    Examples:
+      fincli anomalies
+      fincli anomalies --months 6
+    """
+    init_app()
+    logger.info("anomalies_command_started", months=months)
+
+    try:
+        db = get_db_manager()
+        llm_client = get_llm_client()
+
+        if db.count_transactions() == 0:
+            console.print("[yellow]No transactions found. Run 'fetch' first.[/yellow]")
+            return
+
+        with db.get_session() as session:
+            agent = AnomalyAgent(session=session, llm=llm_client)
+
+            with console.status(
+                f"[bold yellow]Scanning last {months} months for anomalies...",
+                spinner="dots",
+            ):
+                result = agent.run(months_back=months)
+
+        console.print(
+            f"\n[bold]Scanned {result.total_scanned} transactions "
+            f"over the last {months} month(s).[/bold]\n"
+        )
+
+        if not result.anomalies:
+            console.print("[green]No anomalies detected. Spending looks normal.[/green]\n")
+        else:
+            # ── Anomaly table ──────────────────────────────────────────────────
+            table = Table(
+                title=f"[bold red]{len(result.anomalies)} Anomalies Detected[/bold red]",
+                show_lines=True,
+            )
+            table.add_column("Date", style="dim", width=12)
+            table.add_column("Merchant", style="cyan")
+            table.add_column("Amount", style="bold red", justify="right")
+            table.add_column("Category", style="yellow")
+            table.add_column("Reason", style="white")
+
+            for a in result.anomalies:
+                date_str = a.transaction.transaction_date.strftime("%Y-%m-%d")
+                amount_str = f"{a.transaction.currency} {a.transaction.amount:.0f}"
+                z_note = f" (z={a.z_score:.1f})" if a.z_score else ""
+                table.add_row(
+                    date_str,
+                    a.transaction.merchant,
+                    amount_str,
+                    a.transaction.category or "—",
+                    a.reason + z_note,
+                )
+            console.print(table)
+
+        # ── LLM narrative ──────────────────────────────────────────────────────
+        console.print(f"\n[bold cyan]FinCLI >[/bold cyan] {result.narrative}\n")
+        logger.info("anomalies_command_completed", flagged=len(result.anomalies))
+
+    except (LLMClientError,) as e:
+        console.print(f"[red]LLM error: {e}[/red]")
+        logger.error("anomalies_command_failed", error=str(e))
+        raise typer.Exit(code=1)
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        logger.error("anomalies_command_failed", error=str(e))
         raise typer.Exit(code=1)
 
 
