@@ -29,6 +29,7 @@ from fincli.rag.retriever import HybridRetriever
 from fincli.tools.filter_tool import FilterTool
 from fincli.agents.sql_agent import SQLAgent
 from fincli.agents.rag_agent import RAGAgent
+from fincli.agents.orchestrator import OrchestratorAgent
 
 # Initialize
 app = typer.Typer(
@@ -489,6 +490,96 @@ def query(
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
         logger.error("query_command_failed", error=str(e))
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def ask(
+    question: str = typer.Argument(..., help="Any question about your expenses"),
+):
+    """
+    Ask anything about your expenses — the orchestrator picks the right approach.
+
+    Routes automatically to SQL (exact queries), RAG (semantic search), or both.
+    Use this when you're not sure which tool fits — the AI decides.
+
+    Examples:
+      fincli ask "how much did I spend last month?"
+      fincli ask "any suspicious food charges?"
+      fincli ask "is my travel spending unusually high?"
+    """
+    init_app()
+    logger.info("ask_command_started", question=question)
+
+    try:
+        db = get_db_manager()
+        llm_client = get_llm_client()
+
+        if db.count_transactions() == 0:
+            console.print("[yellow]No transactions found. Run 'fetch' first.[/yellow]")
+            return
+
+        embedder = OllamaEmbedder()
+        rag_available = embedder.health_check()
+
+        if not rag_available:
+            console.print(
+                f"[yellow]RAG unavailable (run: ollama pull {embedder.model}). "
+                "Falling back to SQL-only routing.[/yellow]\n"
+            )
+
+        with db.get_session() as session:
+            sql_agent = SQLAgent(llm=llm_client, engine=db.engine)
+
+            if rag_available:
+                filter_tool = FilterTool(llm_client)
+                retriever = HybridRetriever(session, embedder, filter_tool)
+                rag_agent = RAGAgent(retriever=retriever, llm=llm_client)
+                orchestrator = OrchestratorAgent(
+                    llm=llm_client,
+                    sql_agent=sql_agent,
+                    rag_agent=rag_agent,
+                )
+            else:
+                # RAG unavailable — wrap SQL agent to always route sql
+                from fincli.agents.orchestrator import OrchestratorResult
+                class _SqlOnlyOrchestrator:
+                    def run(self, q):
+                        r = sql_agent.run(q)
+                        return OrchestratorResult(
+                            question=q, route="sql", answer=r.answer, sql_result=r
+                        )
+                orchestrator = _SqlOnlyOrchestrator()
+
+            with console.status("[bold yellow]Thinking...", spinner="dots"):
+                result = orchestrator.run(question)
+
+        # ── Route badge ────────────────────────────────────────────────────────
+        route_colors = {"sql": "blue", "rag": "green", "both": "magenta"}
+        color = route_colors.get(result.route, "white")
+        console.print(f"[dim]route: [{color}]{result.route}[/{color}][/dim]")
+
+        # ── If SQL was used, show the generated query ──────────────────────────
+        if result.sql_result and result.sql_result.sql:
+            from rich.panel import Panel
+            from rich.syntax import Syntax
+            sql_display = Syntax(result.sql_result.sql, "sql", theme="monokai", word_wrap=True)
+            console.print(Panel(sql_display, title="[bold]SQL[/bold]", border_style="dim"))
+
+        # ── If RAG rephrased, show the rephrased query ─────────────────────────
+        if result.rag_result and result.rag_result.rephrased:
+            console.print(f"[dim](rephrased: {result.rag_result.final_query})[/dim]")
+
+        console.print(f"\n[bold cyan]FinCLI >[/bold cyan] {result.answer}\n")
+        logger.info("ask_command_completed", route=result.route)
+
+    except (LLMClientError, EmbedderError) as e:
+        console.print(f"[red]Error: {e}[/red]")
+        logger.error("ask_command_failed", error=str(e))
+        raise typer.Exit(code=1)
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        logger.error("ask_command_failed", error=str(e))
         raise typer.Exit(code=1)
 
 
