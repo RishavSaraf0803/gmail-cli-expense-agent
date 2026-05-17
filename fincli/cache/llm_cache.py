@@ -14,12 +14,12 @@ from fincli.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
-class LLMCache:
+class LLMCache(BaseLLMClient):
     """
     Wrapper for LLM clients that adds response caching.
 
-    This class wraps any LLM client and caches responses to reduce
-    API calls and costs.
+    Extends BaseLLMClient so it is a drop-in replacement anywhere
+    a BaseLLMClient is expected.
 
     Features:
     - Transparent caching (no changes to client code)
@@ -68,10 +68,8 @@ class LLMCache:
         self,
         prompt: str,
         system_prompt: Optional[str] = None,
-        temperature: float = 0.7,
-        max_tokens: int = 1000,
-        use_case: str = "default",
-        **kwargs
+        max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
     ) -> str:
         """
         Generate text with caching.
@@ -96,47 +94,34 @@ class LLMCache:
                 system_prompt=system_prompt,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                use_case=use_case,
-                **kwargs
             )
 
             if cached_response:
-                logger.info(
-                    "cache_hit_served",
-                    provider=self.provider,
-                    use_case=use_case
-                )
+                logger.info("cache_hit_served", provider=self.provider)
                 return cached_response
 
-        # Cache miss - call actual client
+        # Cache miss — call actual client
         response = self.client.generate_text(
             prompt=prompt,
             system_prompt=system_prompt,
             temperature=temperature,
             max_tokens=max_tokens,
-            use_case=use_case,
-            **kwargs
         )
 
         # Store in cache
         if self.enable_cache and self.cache_manager and response:
-            # Estimate token counts (rough approximation)
-            # In production, get actual counts from client response
-            input_tokens = len(prompt.split()) * 1.3  # Rough estimate
-            output_tokens = len(response.split()) * 1.3
-
+            input_tokens = int(len(prompt.split()) * 1.3)
+            output_tokens = int(len(response.split()) * 1.3)
             self.cache_manager.set(
                 prompt=prompt,
                 response=response,
                 model=self.model,
                 provider=self.provider,
-                input_tokens=int(input_tokens),
-                output_tokens=int(output_tokens),
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
                 system_prompt=system_prompt,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                use_case=use_case,
-                **kwargs
             )
 
         return response
@@ -145,8 +130,7 @@ class LLMCache:
         self,
         prompt: str,
         system_prompt: Optional[str] = None,
-        temperature: float = 0.0,
-        max_tokens: int = 1000,
+        max_tokens: Optional[int] = None,
         use_case: str = "extraction",
         **kwargs
     ) -> Dict[str, Any]:
@@ -173,53 +157,43 @@ class LLMCache:
                 model=self.model,
                 provider=self.provider,
                 system_prompt=system_prompt,
-                temperature=temperature,
+                temperature=0.0,
                 max_tokens=max_tokens,
-                use_case=use_case,
-                **kwargs
             )
 
             if cached_response:
-                logger.info(
-                    "cache_hit_served_json",
-                    provider=self.provider,
-                    use_case=use_case
-                )
+                logger.info("cache_hit_served_json", provider=self.provider)
                 return json.loads(cached_response)
 
-        # Cache miss - call actual client
+        # Cache miss — call actual client
         response = self.client.extract_json(
             prompt=prompt,
             system_prompt=system_prompt,
-            temperature=temperature,
             max_tokens=max_tokens,
-            use_case=use_case,
-            **kwargs
         )
 
         # Store in cache as JSON string
         if self.enable_cache and self.cache_manager and response:
             response_str = json.dumps(response)
-
-            # Estimate token counts
-            input_tokens = len(prompt.split()) * 1.3
-            output_tokens = len(response_str.split()) * 1.3
-
+            input_tokens = int(len(prompt.split()) * 1.3)
+            output_tokens = int(len(response_str.split()) * 1.3)
             self.cache_manager.set(
                 prompt=prompt,
                 response=response_str,
                 model=self.model,
                 provider=self.provider,
-                input_tokens=int(input_tokens),
-                output_tokens=int(output_tokens),
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
                 system_prompt=system_prompt,
-                temperature=temperature,
+                temperature=0.0,
                 max_tokens=max_tokens,
-                use_case=use_case,
-                **kwargs
             )
 
         return response
+
+    def health_check(self) -> bool:
+        """Delegate health check to underlying client."""
+        return self.client.health_check()
 
     def clear_cache(self):
         """Clear all cached responses."""

@@ -1,0 +1,19 @@
+name: chat_fallback
+version: v1
+system_prompt: |
+  You are FinCLI, a helpful personal finance assistant.
+  Answer the user's question using ONLY the transaction data provided.
+  If the data doesn't contain enough information, say so honestly.
+  Be concise. When citing amounts, include the currency and date.
+user_template: |
+  Relevant Transactions:
+  $transactions
+
+  User: $question
+  Answer:
+parameters:
+  max_tokens: 1024
+  temperature: 0.3
+metadata:
+  description: Fallback chat prompt used when RAG/Ollama is unavailable
+  use_case: chat

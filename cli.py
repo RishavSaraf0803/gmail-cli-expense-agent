@@ -31,6 +31,12 @@ from fincli.agents.sql_agent import SQLAgent
 from fincli.agents.rag_agent import RAGAgent
 from fincli.agents.orchestrator import OrchestratorAgent
 from fincli.agents.anomaly_agent import AnomalyAgent
+from fincli.clients.llm_router import get_llm_router, LLMUseCase
+from fincli.clients.tracked_client import TrackedLLMClient
+from fincli.cache.llm_cache import LLMCache
+from fincli.prompts.prompt_manager import get_prompt_manager
+from fincli.observability.llm_tracker import get_metrics_tracker
+from fincli.resilience.circuit_breaker import get_all_circuit_breakers
 
 # Initialize
 app = typer.Typer(
@@ -47,6 +53,28 @@ setup_logging(
     log_file=settings.log_file
 )
 logger = get_logger(__name__)
+
+
+def _make_client(use_case: LLMUseCase = LLMUseCase.DEFAULT) -> LLMCache:
+    """
+    Build a fully instrumented LLM client for a given use case.
+
+    Layer order (outermost → innermost):
+      LLMCache → TrackedLLMClient → CircuitBreaker → raw provider client
+
+      LLMCache:         skip API call if identical prompt was seen before
+      TrackedLLMClient: measure latency, record tokens/cost, trip circuit breaker
+      CircuitBreaker:   stop calling a provider that keeps failing
+      raw client:       the actual Anthropic / OpenAI / Ollama / Bedrock call
+
+    The use_case label (CHAT, ANALYSIS, EXTRACTION, …) determines which
+    provider the LLMRouter selects and which metrics bucket the call lands in.
+    """
+    router = get_llm_router()
+    raw_client = router.get_client(use_case)
+    tracked = TrackedLLMClient(raw_client, use_case=use_case.value)
+    return LLMCache(tracked)
+
 
 
 def parse_email_date(date_str: str) -> datetime:
@@ -336,7 +364,7 @@ def chat():
 
     try:
         db = get_db_manager()
-        llm_client = get_llm_client()
+        llm_client = _make_client(LLMUseCase.CHAT)
 
         if db.count_transactions() == 0:
             console.print("[yellow]No transactions found. Run 'fetch' first.[/yellow]")
@@ -393,20 +421,33 @@ def chat():
                             rephrased_query = result.final_query
                         else:
                             # Fallback: plain LLM with last-50 context
-                            prompt = f"""You are FinCLI, a helpful personal finance assistant.
-Answer the user's question using ONLY the transaction data below.
-If the data doesn't contain enough information, say so honestly.
-Be concise. When citing amounts, include the currency and date.
+                            # Prompt loaded from versioned YAML via PromptManager
+                            try:
+                                pm = get_prompt_manager()
+                                tmpl = pm.load_prompt("chat", "chat")
+                                system_prompt = tmpl.system_prompt
+                                prompt = tmpl.render_user_prompt(
+                                    transactions=fallback_context,
+                                    question=question,
+                                )
+                                max_tokens = tmpl.get_parameter("max_tokens", 1024)
+                                temperature = tmpl.get_parameter("temperature", 0.3)
+                            except Exception:
+                                # Prompt file missing — fall back to inline default
+                                system_prompt = None
+                                prompt = (
+                                    f"You are FinCLI, a helpful personal finance assistant.\n"
+                                    f"Answer using ONLY the transactions below.\n\n"
+                                    f"Relevant Transactions:\n{fallback_context}\n\n"
+                                    f"User: {question}\nAnswer:"
+                                )
+                                max_tokens, temperature = 1024, 0.3
 
-Relevant Transactions:
-{fallback_context}
-
-User: {question}
-Answer:"""
                             answer = llm_client.generate_text(
                                 prompt=prompt,
-                                max_tokens=1024,
-                                temperature=0.3,
+                                system_prompt=system_prompt,
+                                max_tokens=max_tokens,
+                                temperature=temperature,
                             )
                             rephrased = False
 
@@ -448,7 +489,7 @@ def query(
 
     try:
         db = get_db_manager()
-        llm_client = get_llm_client()
+        llm_client = _make_client(LLMUseCase.ANALYSIS)
 
         if db.count_transactions() == 0:
             console.print("[yellow]No transactions found. Run 'fetch' first.[/yellow]")
@@ -514,7 +555,7 @@ def ask(
 
     try:
         db = get_db_manager()
-        llm_client = get_llm_client()
+        llm_client = _make_client(LLMUseCase.DEFAULT)
 
         if db.count_transactions() == 0:
             console.print("[yellow]No transactions found. Run 'fetch' first.[/yellow]")
@@ -604,7 +645,7 @@ def anomalies(
 
     try:
         db = get_db_manager()
-        llm_client = get_llm_client()
+        llm_client = _make_client(LLMUseCase.ANALYSIS)
 
         if db.count_transactions() == 0:
             console.print("[yellow]No transactions found. Run 'fetch' first.[/yellow]")
@@ -748,6 +789,100 @@ def init():
     except Exception as e:
         console.print(f"[red]Initialization failed: {e}[/red]")
         raise typer.Exit(code=1)
+
+
+@app.command()
+def stats():
+    """
+    Show LLM usage statistics: tokens, cost, latency, and circuit breaker states.
+
+    Reads from fincli_metrics.jsonl (written automatically on every LLM call).
+    """
+    init_app()
+    from rich.panel import Panel
+
+    tracker = get_metrics_tracker()
+    report = tracker.get_summary_report(include_cache_stats=True)
+
+    if report["total_calls"] == 0:
+        console.print("[yellow]No LLM calls recorded yet. Run 'chat', 'query', or 'ask' first.[/yellow]")
+        return
+
+    # ── Summary panel ──────────────────────────────────────────────────────────
+    tokens = report["total_tokens"]
+    success_pct = round(report["success_rate"] * 100, 1)
+    cost = report["total_cost_usd"]
+    console.print(Panel(
+        f"[bold]Total calls:[/bold] {report['total_calls']}  "
+        f"[green]✓ {report['successful_calls']}[/green]  "
+        f"[red]✗ {report['failed_calls']}[/red]  "
+        f"([bold]{success_pct}%[/bold] success)\n"
+        f"[bold]Tokens:[/bold] {tokens['input_tokens']:,} in + {tokens['output_tokens']:,} out "
+        f"= {tokens['total_tokens']:,} total\n"
+        f"[bold]Est. cost:[/bold] ${cost:.4f} USD",
+        title="[bold cyan]LLM Usage Summary[/bold cyan]",
+        border_style="cyan",
+    ))
+
+    # ── Cost by use case ───────────────────────────────────────────────────────
+    if report["cost_by_use_case"]:
+        table = Table(title="Cost by Use Case", show_lines=False)
+        table.add_column("Use Case", style="cyan")
+        table.add_column("Cost (USD)", justify="right", style="yellow")
+        for use_case, uc_cost in sorted(report["cost_by_use_case"].items()):
+            table.add_row(use_case, f"${uc_cost:.4f}")
+        console.print(table)
+
+    # ── Latency ────────────────────────────────────────────────────────────────
+    lat = report["latency_stats"]
+    if lat["mean"] > 0:
+        console.print(
+            f"\n[bold]Latency[/bold]  "
+            f"p50={lat['p50']:.0f}ms  "
+            f"p95={lat['p95']:.0f}ms  "
+            f"mean={lat['mean']:.0f}ms  "
+            f"max={lat['max']:.0f}ms"
+        )
+
+    # ── LLM router config ──────────────────────────────────────────────────────
+    try:
+        router = get_llm_router()
+        routing = router.get_routing_config()
+        table = Table(title="LLM Router Config", show_lines=False)
+        table.add_column("Use Case", style="cyan")
+        table.add_column("Provider", style="green")
+        for use_case, provider in sorted(routing.items()):
+            table.add_row(use_case, provider)
+        console.print(table)
+    except Exception:
+        pass
+
+    # ── Circuit breaker states ─────────────────────────────────────────────────
+    breakers = get_all_circuit_breakers()
+    if breakers:
+        table = Table(title="Circuit Breakers", show_lines=False)
+        table.add_column("Provider", style="cyan")
+        table.add_column("State", style="bold")
+        table.add_column("Failures")
+        for name, cb in breakers.items():
+            s = cb.get_stats()
+            state_color = {"closed": "green", "open": "red", "half_open": "yellow"}.get(s["state"], "white")
+            table.add_row(
+                name,
+                f"[{state_color}]{s['state']}[/{state_color}]",
+                str(s["failure_count"]),
+            )
+        console.print(table)
+
+    # ── Cache stats ────────────────────────────────────────────────────────────
+    if report.get("cache_stats"):
+        cs = report["cache_stats"]
+        console.print(
+            f"\n[bold]Cache[/bold]  "
+            f"hits={cs.get('hits', 0)}  "
+            f"misses={cs.get('misses', 0)}  "
+            f"entries={cs.get('total_entries', 0)}"
+        )
 
 
 if __name__ == "__main__":
